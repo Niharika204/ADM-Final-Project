@@ -1,0 +1,405 @@
+---
+title: "ADM Group Project"
+author: "James Guy, Durga Prasad Gandi, Niharika Matsa, Deekshitha Sai Sangepu"
+date: "2024-05-05"
+output:
+  word_document: default
+  html_document: default
+---
+
+```{r}
+# Load necessary libraries
+library(readr)
+library(dplyr)
+library(caret)
+library(ggplot2)
+library(FactoMineR)
+library(missMDA)
+library(glmnet)
+library(Matrix)
+library(randomForest)
+library(esquisse)
+library(pls)
+```
+
+```{r}
+# Retriving and Pre-processing the training dataset
+Financial_data <- read.csv("C:/Users/gdurg/Downloads/train_v3 (1).csv")
+Financial_data$default <- factor(ifelse(Financial_data$loss > 0, 1, 0))
+Financial_data$loss <- (Financial_data$loss / 100)
+head(Financial_data)
+```
+
+```{r}
+# Verifying the missing values
+missing_rows <- rowMeans(is.na(Financial_data))
+minimum_missing_values <- min(missing_rows)
+minimum_missing_values
+maximum_missing_values <- max(missing_rows)
+maximum_missing_values
+```
+
+```{r}
+# Designing a visual depiction of the dataset
+ggplot(Financial_data, aes(x = "", fill = factor(default))) +
+  geom_bar(position = "fill", width = 0.4) +
+  labs(title = "Proportion of Non-Default vs Default", x = "", y = "Proportion") +
+  scale_fill_manual(values = c("purple", "pink"), labels = c("Non-Default", "Default")) +
+  theme_minimal() +
+  theme(plot.title = element_text(hjust = 0.5),
+        legend.position = "bottom",
+        legend.title = element_blank()) +
+  geom_text(aes(label = scales::percent(..count.. / sum(..count..))),
+            stat = "count", position = position_fill(vjust = 0.5))
+
+```
+
+```{r}
+# Eliminating variables with zero variance and preparing the data  set for analysis.
+
+identifier_column <- ncol(Financial_data)
+deficit_column <- 763 - 1
+Standardized_column <- 764 - 1
+
+Zero_dispersion_indices <- nearZeroVar(Financial_data[, -c(763, 764)])
+Rectified_data <- Financial_data[, -Zero_dispersion_indices]
+
+columns_preprocessing <- setdiff(1:ncol(Rectified_data), c (Standardized_column, deficit_column))
+Financial_preprocess <- preProcess(Rectified_data[, columns_preprocessing], method = c("corr", "medianImpute"))
+
+processed_financial_data <- predict(Financial_preprocess, Rectified_data)
+
+head(processed_financial_data)
+```
+
+```{r}
+# Using a Lasso regression model to choose variables.
+set.seed(256)
+y <- as.vector(as.factor(processed_financial_data$default))
+x <- data.matrix(processed_financial_data[, -c(247, 248)])
+lasso_regression_model <- cv.glmnet(x, y, alpha = 1, preProcess = c("center", "scale"), family = "binomial", nfolds = 10, type.measure = "auc")
+```
+
+```{r}
+# Here, we are using the,
+
+library(ggplot2)
+
+# Retrieve the cross-validation outcomes from the Lasso model.
+
+crossvalidation_findings <- data.frame(
+  lambda = lasso_regression_model$lambda,
+  mean_area_under_curve = lasso_regression_model$cvm,
+  lower_area_under_curve = lasso_regression_model$cvlo,
+  upper_area_under_curve = lasso_regression_model$cvup
+)
+
+# Determining the ideal lambda value
+
+ideal_lambda <- lasso_regression_model$lambda.min
+
+# Creating the plot using ggplot2
+
+ggplot(crossvalidation_findings, aes(x = lambda)) +
+  geom_line(aes(y = mean_area_under_curve), color = "seagreen") +
+  geom_ribbon(aes(ymin = lower_area_under_curve, ymax = upper_area_under_curve), alpha = 0.2, fill = "blue") +
+  geom_vline(xintercept = ideal_lambda, linetype = "dashed", color = "orange") +
+  scale_x_log10() +
+  labs(title = "Cross-validation with Lasso regression",
+       x = "Logarithm(Lambda)",
+       y = "Area_Under_Curve") +
+  theme_minimal() +
+  theme(plot.title = element_text(hjust = 0.5))
+
+```
+
+```{r}
+
+# Retrieving the coefficients from the Lasso model corresponding to the optimal lambda value.
+
+coefficients <- coef(lasso_regression_model, s = "lambda.min")
+
+# Creating a data frame containing variable names along with their respective coefficients.
+
+new_financial_coefficients <- data.frame(name = coefficients@Dimnames[[1]][coefficients@i + 1], coefficient = coefficients@x)
+
+# Compute the absolute values of the coefficients
+
+new_financial_coefficients$coefficient <- abs(new_financial_coefficients$coefficient)
+
+# Arrange the coefficients in descending order
+
+new_financial_coefficients[order(new_financial_coefficients$coefficient, decreasing = TRUE), ]
+
+# Exclude the intercept term from the coefficients data frame
+
+new_financial_coefficients<- new_financial_coefficients[-1, ]
+
+# Transform the variable names into a vector
+
+new_financial_coefficients <- as.vector(new_financial_coefficients$name)
+
+# Append the "default" variable to the vector of selected variables
+
+new_financial_coefficients <- c(new_financial_coefficients, "default")
+
+# Extract the variables from the processed data set according to the chosen coefficients
+
+Data_selected_Lasso <- select(processed_financial_data, new_financial_coefficients)
+```
+
+```{r}
+# PCA (Principal Component Analysis) statistical method used for simplifying the complexity in high-dimensional data 
+
+principal_component_analysis_model <- preProcess(Data_selected_Lasso[, -c(181)], method = c("center", "scale", "pca"), thresh = 0.80)
+principal_component_analysis_processed_data <- predict(principal_component_analysis_model, Data_selected_Lasso)
+principal_component_analysis_model
+principal_component_analysis_processed_data$default <- Data_selected_Lasso$default
+
+```
+
+```{r}
+# Dividing the PCA-processed data into training and validation sets.
+
+set.seed(282)
+
+principal_component_analysis_index <- createDataPartition(principal_component_analysis_processed_data$default, p = 0.70, list = FALSE)
+
+train_data_pca <- principal_component_analysis_processed_data[principal_component_analysis_index, ]
+
+validation_data_pca <- principal_component_analysis_processed_data[-principal_component_analysis_index, ]
+
+```
+
+```{r}
+
+# Verifying the dimensions of the training and validation datasets.
+
+dim(train_data_pca)
+dim(validation_data_pca)
+
+```
+
+```{r}
+# Transforming the "default" variable into a categorical factor within the training and validation data sets.
+
+train_data_pca$default <- as.factor(train_data_pca$default)
+validation_data_pca$default <- as.factor(validation_data_pca$default)
+
+```
+
+```{r}
+# Applying a Random Forest model to the PCA-transformed data.
+
+set.seed(123)
+randomforest_model_pca<- randomForest(default ~ ., data = train_data_pca, mtry = 5)
+print(randomforest_model_pca)
+
+```
+
+```{r}
+
+# Assessing the performance of the Random Forest Model on the Validation dataset.
+
+pca_conclusion <- data.frame(actual = validation_data_pca$default, predict(randomforest_model_pca, newdata = validation_data_pca, type = "prob"))
+pca_conclusion$predict <- ifelse(pca_conclusion$X0 > 0.70, 0, 1)
+principal_component_analysis <- confusionMatrix(as.factor(pca_conclusion$predict), as.factor(pca_conclusion$actual), positive = '1')
+
+principal_component_analysis
+```
+
+```{r}
+# Preparing the Test dataset and selecting variables using Lasso coefficients.
+
+test_data_pca <- read.csv("C:/Users/gdurg/Downloads/test__no_lossv3.csv")
+test_principal_analysis_1 <- preProcess(test_data_pca, method = c("medianImpute"))
+processed_test_dataset <- predict(test_principal_analysis_1, test_data_pca)
+lasso_selected_test_dataset <- select(processed_test_dataset, new_financial_coefficients[new_financial_coefficients != "default"])
+
+```
+
+```{r}
+# Utilizing PCA on the Lasso-selected test data set with pre-processing parameters obtained from the training data.
+
+set.seed(123)
+test_principal_analysis_model <- preProcess(lasso_selected_test_dataset, method = c("center", "scale", "pca"), thresh = 0.80)
+processed_pca_test_dataset <- predict(principal_component_analysis_model, lasso_selected_test_dataset)
+
+```
+
+```{r}
+
+# Predicting outcomes on the PCA-processed test data and identifying individuals who are likely to default.
+
+set.seed(812)
+
+predictions_principal_analysis <- data.frame(id = test_data_pca$id, predict(randomforest_model_pca, processed_pca_test_dataset, type = "prob"))
+threshold <- 0.75
+predictions_principal_analysis$default_predicted <- ifelse(predictions_principal_analysis$X0 > threshold, 0, 1)
+Filtered_PCA_predictions <- predictions_principal_analysis %>% filter(default_predicted == 1)
+Filtered_PCA_predictions
+```
+
+```{r}
+# Incorporating predicted default labels into the test data set and identifying defaulters
+
+test_dataset_2 <- test_data_pca
+test_dataset_2$predictions <- predictions_principal_analysis$default_predicted
+test_dataset_Filtered <- test_dataset_2 %>% filter(predictions == 1)
+
+```
+
+```{r}
+
+# Preparing the training data set for regression by loading and pre processing it.
+
+
+train_dataset <- read.csv("C:/Users/gdurg/Downloads/train_v3 (1).csv")
+filtered_train_dataset <- train_dataset %>% filter(loss != 0)
+filtered_train_dataset$loss <- (filtered_train_dataset$loss / 100)
+
+indicies_with_zero_variance <- nearZeroVar(filtered_train_dataset[, -c(763)])
+model_training <- filtered_train_dataset[, -indicies_with_zero_variance]
+new_train_3 <- preProcess(model_training[, -c(748)], method = c("medianImpute", "corr"))
+processed_train_dataset <- predict(new_train_3, model_training)
+
+```
+
+```{r}
+summary(processed_train_dataset)
+
+```
+
+
+```{r}
+
+# Lasso regression model for variable selection
+
+set.seed(123)
+x_1 <- as.matrix(processed_train_dataset[, -c(252)])
+y_2 <- as.vector(processed_train_dataset$loss)
+lasso_regression_model <- cv.glmnet(x_1, y_2, alpha = 1, family = "gaussian", nfolds = 10, type.measure = "mse")
+
+```
+
+```{r}
+plot(lasso_regression_model)
+lasso_regression_model$lambda.min
+```
+
+```{r}
+
+# Deriving Lasso coefficients, processing them, and selecting variables from the training dataset.
+
+coefficient_test <- coef(lasso_regression_model, s = "lambda.min")
+coefficient_test <- data.frame(name = coefficient_test@Dimnames[[1]][coefficient_test@i + 1], coefficient = coefficient_test@x)
+coefficient_test$coefficient <- abs(coefficient_test$coefficient)
+coefficient_test[order(coefficient_test$coefficient, decreasing = TRUE), ]
+coefficient_test <- coefficient_test[-1, ]
+coefficient_test <- as.vector(coefficient_test$name)
+coefficient_test <- c(coefficient_test, "loss")
+Trainingdata_Lassoregression <- select(processed_train_dataset, coefficient_test)
+
+```
+
+```{r}
+# Splitting the Lasso-selected training data into subsets for Ridge regression training and validation.
+
+set.seed(654)
+Financial_index_1 <- createDataPartition(Trainingdata_Lassoregression$loss, p = 0.80, list = FALSE)
+ridge_train_dataset <- Trainingdata_Lassoregression[Financial_index_1, ]
+ridge_validation_dataset <- Trainingdata_Lassoregression[-Financial_index_1, ]
+
+```
+
+```{r}
+# Constructing a Ridge Regression model while implementing cross-validation.
+
+x_3 <- as.matrix(ridge_train_dataset[, -c(121)])
+y_3 <- as.vector(ridge_train_dataset$loss)
+ridge_regression_model <- cv.glmnet(x_3, y_3, alpha = 0, family = "gaussian", nfolds = 10, type.measure = "mae")
+
+summary(ridge_regression_model)
+
+```
+
+```{r}
+# Visualizing the Ridge Regression model, obtaining the optimal lambda, and extracting coefficients from the model.
+
+plot(ridge_regression_model)
+ridge_regression_model$lambda.min
+coefficient_conclusion <- coef(ridge_regression_model, s = "lambda.min")
+```
+
+```{r}
+# Evaluating the performance of the Ridge model
+
+x_4 <- as.matrix(ridge_validation_dataset[, -c(121)])
+y_4 <- as.vector(ridge_validation_dataset$loss)
+predicted_deficit <- predict(ridge_regression_model, s = ridge_regression_model$lambda.min, newx = x_4)
+mean_absolute_error <- mean(abs((predicted_deficit - y_4)))
+mean_absolute_error_conclusion <- cbind(y_4, predicted_deficit)
+print(mean_absolute_error)
+```
+
+```{r}
+# Forecasting the loss for customers who default using the test data set
+
+selected_test_dataset <- select(test_dataset_Filtered, coefficient_test[coefficient_test != "loss"])
+
+```
+
+```{r}
+# Processing the chosen test data by applying median imputation as a preliminary step.
+
+set.seed(123)
+preprocess_dataset_final <- preProcess(selected_test_dataset, method = c("medianImpute"))
+processed_selected_test_data <- predict(preprocess_dataset_final, selected_test_dataset)
+
+```
+
+```{r}
+
+# Forecasting the loss for pre processed test data and merging it with filtered PCA predictions.
+
+potential_defaults <- as.data.frame(round(abs(predict(ridge_regression_model, s = ridge_regression_model$lambda.min, newx = as.matrix(selected_test_dataset))) * 100))
+
+Given_loss_default <- cbind.data.frame(Filtered_PCA_predictions, potential_defaults)
+
+```
+
+```{r}
+
+#Producing the ultimate forecasted document with loss assessments.
+
+# Loading the necessary library
+library(dplyr)
+
+#Verify the existence of the input data frames
+if (exists("predictions_principal_analysis") && exists("Given_loss_default")) {
+  #Execute a left join operation
+  join_data <- left_join(predictions_principal_analysis, Given_loss_default, by = 'id')
+
+  # Convert the column "predicted_default.x" to numeric if necessary.
+  join_data$default_predicted.x <-  as.numeric(as.character(join_data$default_predicted.x))
+
+  # Computing the loss column
+  join_data$loss <- ifelse(join_data$default_predicted.x == 0, 0, join_data$s1)
+
+  # Generating the final dataframe
+  final_predicted_file <- data.frame(id = join_data$id, loss = join_data$loss)
+
+  # Save the data frame as a CSV file
+  write.csv(final_predicted_file, "final_predicted_file.csv", row.names = FALSE)
+  
+  cat("The final predicted file has been generated successfully.")
+} else {
+  cat("The input data frames were not found. Please ensure that these data frames exist before proceeding further.")
+}
+
+```
+
+```{r}
+getwd()
+
+```
